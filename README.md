@@ -1,56 +1,70 @@
-# ⚔️ PVC Sword Fighting Game
+# Gesture-Controlled Game Collection
 
-A real-time sword fighting game using computer vision and MediaPipe pose detection.
+This project is a collection of interactive games that use your body as a controller. Using a webcam, your movements are translated into in-game actions, providing a unique and immersive gaming experience.
 
-## 🚀 Quick Start
+## Features
+
+-   **Real-time Gesture Recognition:** Utilizes MediaPipe for accurate and real-time pose detection.
+-   **Multiple Game Modes:** Includes Sword Fighting, IRL Martial Arts, and Flappy Bird.
+-   **Multi-player Support:** The Sword Fighting and IRL Martial Arts games support two players.
+-   **3D Stick Figure Rendering:** Visualizes your pose as a 3D stick figure in the game.
+
+## Games
+
+### 1. Sword Fighting
+
+A two-player sword fighting game where each player controls a virtual sword with their body movements. The goal is to hit your opponent to score points.
+
+### 2. IRL Martial Arts Fighting
+
+A gesture-based fighting game where you can perform various attacks like punches, kicks, and blocks by making the corresponding real-life movements.
+
+### 3. Flappy Bird
+
+A classic Flappy Bird game where you control the bird by flapping your arms.
+
+## Dependencies
+
+The project requires the following Python libraries:
+
+-   `mediapipe>=0.10.14`
+-   `opencv-python>=4.8.0`
+-   `pygame>=2.5.0`
+-   `numpy>=1.24.0`
+-   `onnxruntime>=1.19.0`
+-   `requests>=2.31.0`
+
+## Installation
+
+1.  **Clone the repository:**
+    ```bash
+    git clone <repository-url>
+    cd <repository-directory>
+    ```
+
+2.  **Create a virtual environment:**
+    ```bash
+    python -m venv .venv
+    source .venv/bin/activate
+    ```
+
+3.  **Install the dependencies:**
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+## How to Run
+
+To start the game, run the `main.py` script:
 
 ```bash
-# Test pose detection (2-person support)
-python pose_extractor.py
-
-# Play the full game
-python game.py
+python main.py
 ```
 
-## 🎯 Features
+A menu will appear allowing you to choose which game to play.
 
-- **Real-time 2-person pose detection**
-- **RGB camera auto-detection** (1920x1080 support)
-- **Hit detection with visual feedback**
-- **Interactive controls and live scoreboard**
+## Controls
 
-## 📚 Documentation
-
-Complete guides available in the `docs/` folder:
-
-- **[📖 Main Documentation](docs/README.md)** - Complete overview
-- **[🎯 Pose Extractor Guide](docs/pose_extractor_guide.md)** - API reference and usage
-- **[🎮 Game Demo Guide](docs/game_demo_guide.md)** - How to play and setup
-- **[⚔️ Original Design](docs/Sword_Fighting_Game.md)** - Game concept and design
-
-## 🎮 How to Play
-
-1. Stand on opposite sides of the camera view
-2. Use PVC pipes as swords (system tracks your wrists)
-3. Hit opponent's head or torso for points
-4. First to 3 points wins!
-
-### Controls
-- **'b'**: Toggle bounding boxes
-- **'ESC'**: Exit
-
-## 🔧 Environment Setup
-
-Using Nix (recommended):
-```bash
-direnv allow  # Auto-loads environment
-```
-
-Manual setup:
-```bash
-pip install mediapipe opencv-python numpy
-```
-
----
-
-**For complete documentation, see [docs/README.md](docs/README.md)**
+-   **Navigation:** Use the number keys (1, 2, 3) to select a game from the menu.
+-   **In-Game Actions:** Control the games by performing the corresponding physical movements in front of your webcam.
+-   **Exit:** Press the `ESC` key to exit the game.

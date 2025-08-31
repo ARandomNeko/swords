@@ -19,12 +19,7 @@ from dataclasses import dataclass
 from enum import Enum
 from collections import deque
 
-@dataclass
-class OffsetLandmark:
-    x: float
-    y: float
-    z: float
-    visibility: float
+from FlappyBird import play_flappy_bird
 
 # Initialize MediaPipe Pose for multi-person detection
 mp_pose = mp.solutions.pose
@@ -107,6 +102,7 @@ class GameMode(Enum):
     SETTINGS = "settings"
     SWORD_FIGHTING = "sword_fighting"
     IRL_FIGHTING = "irl_fighting"
+    FLAPPY_BIRD = "flappy_bird"
 
 class AttackType(Enum):
     """Types of IRL attacks"""
@@ -955,6 +951,9 @@ class EnhancedGameSystem:
                     frame = self.run_sword_fighting(frame, poses, current_time)
                 elif self.current_mode == GameMode.IRL_FIGHTING:
                     frame = self.run_irl_fighting(frame, poses, current_time)
+                elif self.current_mode == GameMode.FLAPPY_BIRD:
+                    self.run_flappy_bird_game()
+                    continue
                 
                 # Display frame
                 if frame is not None:
@@ -971,6 +970,8 @@ class EnhancedGameSystem:
                     elif key == ord('2'):
                         self.current_mode = GameMode.IRL_FIGHTING
                         self.irl_fighting_game.reset_game()
+                    elif key == ord('3'):
+                        self.current_mode = GameMode.FLAPPY_BIRD
                     elif key == ord('s'):
                         self.current_mode = GameMode.SETTINGS
                 elif self.current_mode == GameMode.SETTINGS:
@@ -1023,50 +1024,29 @@ class EnhancedGameSystem:
         
         # Menu options
         options = [
-            "1. SWORD FIGHTING GAME - 3D ENHANCED",
-            "   • 3D sword with elbow-wrist angle tracking",
-            "   • 2D consistent length with 3D visual effects", 
-            "   • Advanced arm extension and depth calculations",
-            "   • Elbow-weighted sword direction (70% arm, 30% elbow)",
-            "   • Enhanced 3D collision detection with 0.5s cooldown",
-            "",
-            "2. IRL MARTIAL ARTS FIGHTING",
-            "   • Gesture-based fighting with real attacks",
-            "   • Punch, Kick, Uppercut, Block, Sweep moves",
-            "   • Health system with combo multipliers",
-            "   • Real-time gesture recognition",
-            "   • Blocking system reduces damage",
-            "",
-            "Press [1] for 3D Sword Fighting or [2] for IRL Fighting",
+            "1. SWORD FIGHTING",
+            "2. IRL FIGHTING",
+            "3. FLAPPY BIRD",
+        ]
+        
+        y_start = 200
+        for i, option in enumerate(options):
+            color = COLORS['player1'] if '1' in option else COLORS['player2'] if '2' in option else WHITE
+            cv2.putText(frame, option, (50, y_start + i * 60), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+        
+        # Instructions
+        instructions = [
+            "Press [1], [2], or [3] to select a game mode.",
             "Press [S] for Settings",
             "Press [ESC] to exit"
         ]
         
-        y_start = 150
-        for i, option in enumerate(options):
-            if option.startswith(('1.', '2.')):
-                color = COLORS['player1'] if option.startswith('1.') else COLORS['player2']
-            elif option.startswith('Press'):
-                color = YELLOW
-            else:
-                color = WHITE
-            
-            cv2.putText(frame, option, (50, y_start + i * 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-        
-        # Instructions
-        instructions = [
-            "CONTROLS:",
-            "Sword Fighting: Use red/blue colored objects as swords",
-            "IRL Fighting: Use your body gestures to attack and defend",
-            "Both modes: [R] Restart game, [M] Return to menu"
-        ]
-        
-        inst_y = y_start + len(options) * 30 + 50
+        inst_y = y_start + len(options) * 60 + 50
         for i, inst in enumerate(instructions):
-            color = CYAN if inst.startswith('CONTROLS') else WHITE
-            cv2.putText(frame, inst, (50, inst_y + i * 25), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+            color = YELLOW
+            cv2.putText(frame, inst, (50, inst_y + i * 30), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
         
         return frame
 
@@ -1867,6 +1847,18 @@ class EnhancedGameSystem:
         self.game_start_time = time.time()
         self.winner = None
     
+    def run_flappy_bird_game(self):
+        """Release resources, run Flappy Bird, then re-acquire resources."""
+        self.cap.release()
+        cv2.destroyWindow('Enhanced Fighting Game System')
+
+        play_flappy_bird()
+
+        self.setup_camera()
+        cv2.namedWindow('Enhanced Fighting Game System')
+        cv2.setMouseCallback('Enhanced Fighting Game System', self.handle_mouse)
+        self.current_mode = GameMode.MENU
+
     def cleanup(self):
         """Clean up resources"""
         self.cap.release()
