@@ -1176,7 +1176,14 @@ class EnhancedGameSystem:
             cv2.circle(frame, sword_line_p2[1], 5, WHITE, -1) # Tip
         
         # Hit detection using line-rectangle collision
-        if not self.winner and len(poses) >= 2:
+        swords_collided = False
+        if sword_line_p1 and sword_line_p2:
+            if self._line_line_collision(sword_line_p1[0], sword_line_p1[1], sword_line_p2[0], sword_line_p2[1]):
+                swords_collided = True
+                cv2.putText(frame, "Sword Collision", (frame_width // 2 - 200, frame_height // 2), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 3)
+
+        if not self.winner and len(poses) >= 2 and not swords_collided:
             if len(body_boxes) > 1 and sword_line_p1 and body_boxes[1]:
                 if self._line_rect_collision(sword_line_p1[0], sword_line_p1[1], body_boxes[1]):
                     if current_time - self.sword_players[0].last_hit_time > self.settings_sliders["hit_cooldown"].current_val:
