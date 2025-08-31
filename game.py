@@ -19,6 +19,13 @@ from dataclasses import dataclass
 from enum import Enum
 from collections import deque
 
+@dataclass
+class OffsetLandmark:
+    x: float
+    y: float
+    z: float
+    visibility: float
+
 # Initialize MediaPipe Pose for multi-person detection
 mp_pose = mp.solutions.pose
 mp_drawing = mp.solutions.drawing_utils
@@ -91,8 +98,8 @@ MAX_HEALTH = 100
 GESTURE_HOLD_TIME = 0.5  # seconds to hold gesture
 ATTACK_VELOCITY_THRESHOLD = 20.0
 SWORD_TO_TORSO_RATIO = 1.2  # sword length relative to torso (70% of user height ≈ 120% of torso)
-WRIST_COMBINE_DISTANCE = 60  # pixels - distance for wrists to combine into sword
-DEPTH_SCALE_FACTOR = 500  # Scale factor for 3D depth calculations
+WRIST_COMBINE_DISTANCE = 80  # pixels - distance for wrists to combine into sword
+DEPTH_SCALE_FACTOR = 600  # Scale factor for 3D depth calculations
 
 class GameMode(Enum):
     """Game mode selection"""
@@ -107,6 +114,7 @@ class AttackType(Enum):
     BLOCK = "block"
     UPPERCUT = "uppercut"
     SWEEP = "sweep"
+    SWORD_GESTURE = "sword_gesture"
 
 @dataclass
 class Player:
@@ -124,6 +132,7 @@ class Player:
     body_box: Optional[Tuple[int, int, int, int]] = None
     wrist_positions: List[Tuple[int, int]] = None
     is_blocking: bool = False
+    smoothed_torso_height: float = 0.0
     
     def __post_init__(self):
         if self.attack_history is None:
@@ -179,8 +188,29 @@ class GestureRecognizer:
                 'damage': 20,
                 'requirements': ['low_leg_motion', 'horizontal_sweep'],
                 'cooldown': 1.0
+            },
+            AttackType.SWORD_GESTURE.value: {
+                'description': 'Hold hands together to form a sword',
+                'damage': 0,
+                'requirements': ['hands_together'],
+                'cooldown': 0.0
             }
         }
+    
+    def _detect_sword_gesture(self, landmarks) -> bool:
+        """Detects if the hands are held together to form a sword."""
+        try:
+            left_wrist = landmarks[mp_pose.PoseLandmark.LEFT_WRIST.value]
+            right_wrist = landmarks[mp_pose.PoseLandmark.RIGHT_WRIST.value]
+
+            if left_wrist.visibility < 0.5 or right_wrist.visibility < 0.5:
+                return False
+
+            distance = math.sqrt((left_wrist.x - right_wrist.x)**2 + (left_wrist.y - right_wrist.y)**2)
+
+            return distance < 0.15
+        except (AttributeError, IndexError):
+            return False
     
     def detect_attack(self, player: Player, current_time: float) -> Optional[AttackData]:
         """Detect attack gestures from pose landmarks"""
@@ -189,7 +219,7 @@ class GestureRecognizer:
 
         # Check each attack type
         for attack_type in AttackType:
-            if self._check_attack_pattern(player.pose_landmarks, attack_type, current_time):
+            if self._check_attack_pattern(player, player.pose_landmarks, attack_type, current_time):
                 # Calculate attack velocity and position
                 velocity = self._calculate_gesture_velocity(player, attack_type)
                 position = self._get_attack_position(player.pose_landmarks, attack_type)
@@ -199,26 +229,28 @@ class GestureRecognizer:
         
         return None
     
-    def _check_attack_pattern(self, landmarks, attack_type: AttackType, current_time: float) -> bool:
+    def _check_attack_pattern(self, player: Player, landmarks, attack_type: AttackType, current_time: float) -> bool:
         """Check if current pose matches attack pattern"""
         try:
             if attack_type == AttackType.PUNCH:
-                return self._detect_punch(landmarks)
+                return self._detect_punch(player, landmarks)
             elif attack_type == AttackType.KICK:
-                return self._detect_kick(landmarks)
+                return self._detect_kick(player, landmarks)
             elif attack_type == AttackType.UPPERCUT:
-                return self._detect_uppercut(landmarks)
+                return self._detect_uppercut(player, landmarks)
             elif attack_type == AttackType.BLOCK:
                 return self._detect_block(landmarks)
             elif attack_type == AttackType.SWEEP:
-                return self._detect_sweep(landmarks)
+                return self._detect_sweep(player, landmarks)
+            elif attack_type == AttackType.SWORD_GESTURE:
+                return self._detect_sword_gesture(landmarks)
         except (AttributeError, IndexError):
             pass
         
         return False
     
-    def _detect_punch(self, landmarks) -> bool:
-        """Detect punch gesture - extended arm forward"""
+    def _detect_punch(self, player: Player, landmarks) -> bool:
+        """Detect punch gesture - extended arm forward with high velocity"""
         try:
             left_shoulder = landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER.value]
             right_shoulder = landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER.value]
@@ -228,99 +260,127 @@ class GestureRecognizer:
             right_elbow = landmarks[mp_pose.PoseLandmark.RIGHT_ELBOW.value]
             
             # Check if either arm is extended forward (wrist forward of shoulder)
-            left_extended = left_wrist.z < left_shoulder.z - 0.1  # Z is depth
-            right_extended = right_wrist.z < right_shoulder.z - 0.1
+            left_extended = left_wrist.z < left_shoulder.z - 0.15  # Increased depth threshold
+            right_extended = right_wrist.z < right_shoulder.z - 0.15
+
+            # Check if arm is relatively straight
+            left_straight = abs(left_elbow.y - (left_shoulder.y + left_wrist.y) / 2) < 0.1
+            right_straight = abs(right_elbow.y - (right_shoulder.y + right_wrist.y) / 2) < 0.1
+
+            if not (left_extended and left_straight) and not (right_extended and right_straight):
+                return False
+
+            # Check for forward velocity of the wrist
+            velocity = self._calculate_gesture_velocity(player, AttackType.PUNCH)
+            if velocity > ATTACK_VELOCITY_THRESHOLD:
+                return True
             
-            # Check if arm is relatively straight (elbow between shoulder and wrist)
-            left_straight = abs(left_elbow.x - (left_shoulder.x + left_wrist.x) / 2) < 0.1
-            right_straight = abs(right_elbow.x - (right_shoulder.x + right_wrist.x) / 2) < 0.1
-            
-            return (left_extended and left_straight) or (right_extended and right_straight)
+            return False
             
         except (AttributeError, IndexError):
             return False
     
-    def _detect_kick(self, landmarks) -> bool:
-        """Detect kick gesture - leg raised above waist"""
+    def _detect_kick(self, player: Player, landmarks) -> bool:
+        """Detect kick gesture - leg raised above waist with high velocity"""
         try:
             left_hip = landmarks[mp_pose.PoseLandmark.LEFT_HIP.value]
             right_hip = landmarks[mp_pose.PoseLandmark.RIGHT_HIP.value]
             left_knee = landmarks[mp_pose.PoseLandmark.LEFT_KNEE.value]
             right_knee = landmarks[mp_pose.PoseLandmark.RIGHT_KNEE.value]
-            left_ankle = landmarks[mp_pose.PoseLandmark.LEFT_ANKLE.value]
-            right_ankle = landmarks[mp_pose.PoseLandmark.RIGHT_ANKLE.value]
             
             # Check if either knee is raised significantly above hip level
-            left_knee_raised = left_knee.y < left_hip.y - 0.1
-            right_knee_raised = right_knee.y < right_hip.y - 0.1
+            left_knee_raised = left_knee.y < left_hip.y - 0.2
+            right_knee_raised = right_knee.y < right_hip.y - 0.2
             
-            # Check if ankle is also raised (confirming leg lift)
-            left_ankle_raised = left_ankle.y < left_hip.y
-            right_ankle_raised = right_ankle.y < right_hip.y
+            if not (left_knee_raised or right_knee_raised):
+                return False
+
+            # Check for upward velocity of the ankle
+            velocity = self._calculate_gesture_velocity(player, AttackType.KICK)
+            if velocity > ATTACK_VELOCITY_THRESHOLD:
+                return True
             
-            return (left_knee_raised and left_ankle_raised) or (right_knee_raised and right_ankle_raised)
-            
+            return False
         except (AttributeError, IndexError):
             return False
     
-    def _detect_uppercut(self, landmarks) -> bool:
-        """Detect uppercut gesture - upward arm motion"""
+    def _detect_uppercut(self, player: Player, landmarks) -> bool:
+        """Detect uppercut gesture - upward arm motion with high velocity"""
         try:
             left_shoulder = landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER.value]
             right_shoulder = landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER.value]
             left_wrist = landmarks[mp_pose.PoseLandmark.LEFT_WRIST.value]
             right_wrist = landmarks[mp_pose.PoseLandmark.RIGHT_WRIST.value]
+            left_elbow = landmarks[mp_pose.PoseLandmark.LEFT_ELBOW.value]
+            right_elbow = landmarks[mp_pose.PoseLandmark.RIGHT_ELBOW.value]
+
+            # Check if wrist is above elbow and elbow is bent
+            left_upward = left_wrist.y < left_elbow.y and left_elbow.y < left_shoulder.y
+            right_upward = right_wrist.y < right_elbow.y and right_elbow.y < right_shoulder.y
             
-            # Check if wrist is above shoulder (upward motion)
-            left_upward = left_wrist.y < left_shoulder.y - 0.1
-            right_upward = right_wrist.y < right_shoulder.y - 0.1
+            if not (left_upward or right_upward):
+                return False
+
+            # Check for upward velocity of the wrist
+            velocity = self._calculate_gesture_velocity(player, AttackType.UPPERCUT)
+            if velocity > ATTACK_VELOCITY_THRESHOLD:
+                return True
             
-            return left_upward or right_upward
-            
+            return False
         except (AttributeError, IndexError):
             return False
     
     def _detect_block(self, landmarks) -> bool:
         """Detect block gesture - arms crossed in front"""
         try:
-            left_shoulder = landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER.value]
-            right_shoulder = landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER.value]
             left_wrist = landmarks[mp_pose.PoseLandmark.LEFT_WRIST.value]
             right_wrist = landmarks[mp_pose.PoseLandmark.RIGHT_WRIST.value]
-            
-            # Check if wrists are in front of body and close together
+            left_shoulder = landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER.value]
+            right_shoulder = landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER.value]
+
+            # Check if wrists are crossed
+            wrists_crossed = (left_wrist.x > right_wrist.x)
+
+            # Check if wrists are in front of the torso
             shoulder_center_x = (left_shoulder.x + right_shoulder.x) / 2
-            wrist_center_x = (left_wrist.x + right_wrist.x) / 2
-            
-            # Arms should be in front of body center
-            arms_forward = abs(wrist_center_x - shoulder_center_x) < 0.15
-            
-            # Wrists should be at chest level (between shoulders and hips)
-            chest_level = (left_wrist.y > left_shoulder.y and left_wrist.y < left_shoulder.y + 0.3 and
-                          right_wrist.y > right_shoulder.y and right_wrist.y < right_shoulder.y + 0.3)
-            
-            return arms_forward and chest_level
-            
+            wrists_in_front = (left_wrist.x < shoulder_center_x + 0.1 and right_wrist.x > shoulder_center_x - 0.1)
+
+            # Wrists should be at chest level
+            chest_level = (left_wrist.y > left_shoulder.y and left_wrist.y < (left_shoulder.y + 0.4) and
+                           right_wrist.y > right_shoulder.y and right_wrist.y < (right_shoulder.y + 0.4))
+
+            return wrists_crossed and wrists_in_front and chest_level
+
         except (AttributeError, IndexError):
             return False
     
-    def _detect_sweep(self, landmarks) -> bool:
-        """Detect sweep gesture - low horizontal leg motion"""
+    def _detect_sweep(self, player: Player, landmarks) -> bool:
+        """Detect sweep gesture - low horizontal leg motion with high velocity"""
         try:
             left_hip = landmarks[mp_pose.PoseLandmark.LEFT_HIP.value]
             right_hip = landmarks[mp_pose.PoseLandmark.RIGHT_HIP.value]
             left_ankle = landmarks[mp_pose.PoseLandmark.LEFT_ANKLE.value]
             right_ankle = landmarks[mp_pose.PoseLandmark.RIGHT_ANKLE.value]
-            
-            # Check if one leg is extended horizontally (sweep motion)
-            hip_level = (left_hip.y + right_hip.y) / 2
-            
-            # One ankle should be at hip level or higher (leg raised horizontally)
-            left_horizontal = abs(left_ankle.y - hip_level) < 0.1
-            right_horizontal = abs(right_ankle.y - hip_level) < 0.1
-            
-            return left_horizontal or right_horizontal
-            
+            left_knee = landmarks[mp_pose.PoseLandmark.LEFT_KNEE.value]
+            right_knee = landmarks[mp_pose.PoseLandmark.RIGHT_KNEE.value]
+
+            # Check for a low, straight leg
+            left_leg_low = left_ankle.y > left_hip.y and left_knee.y > left_hip.y
+            right_leg_low = right_ankle.y > right_hip.y and right_knee.y > right_hip.y
+
+            # Check for leg extension
+            left_leg_extended = abs(left_ankle.x - left_hip.x) > 0.2
+            right_leg_extended = abs(right_ankle.x - right_hip.x) > 0.2
+
+            if not ((left_leg_low and left_leg_extended) or (right_leg_low and right_leg_extended)):
+                return False
+
+            # Check for horizontal velocity of the ankle
+            velocity = self._calculate_gesture_velocity(player, AttackType.SWEEP)
+            if velocity > ATTACK_VELOCITY_THRESHOLD:
+                return True
+
+            return False
         except (AttributeError, IndexError):
             return False
     
@@ -351,6 +411,16 @@ class GestureRecognizer:
         
         return max(velocities) if velocities else 0.0
     
+    def detect_sword_gesture_only(self, player: Player, current_time: float) -> Optional[AttackData]:
+        """Detects only the sword gesture."""
+        if not player.pose_landmarks:
+            return None
+
+        if self._detect_sword_gesture(player.pose_landmarks):
+            return AttackData(AttackType.SWORD_GESTURE, 0.0, (0, 0), current_time, 0)
+        
+        return None
+
     def _get_attack_position(self, landmarks, attack_type: AttackType) -> Tuple[int, int]:
         """Get the position of the attack based on type"""
         try:
@@ -417,6 +487,14 @@ class IRLFightingGame:
     
     def update(self, player_poses: List[Any], current_time: float):
         """Update IRL fighting game state"""
+        # Sort poses by x-position to correctly assign players
+        if len(player_poses) == 2 and player_poses[0] and player_poses[1]:
+            if len(player_poses[0]) > 0 and len(player_poses[1]) > 0:
+                pose1_x = sum(lm.x for lm in player_poses[0]) / len(player_poses[0])
+                pose2_x = sum(lm.x for lm in player_poses[1]) / len(player_poses[1])
+                if pose1_x > pose2_x:
+                    player_poses = [player_poses[1], player_poses[0]] # Swap poses
+
         # Update player poses and detect attacks
         for i, player in enumerate(self.players):
             if i < len(player_poses) and player_poses[i]:
@@ -468,7 +546,7 @@ class IRLFightingGame:
             actual_damage = int(attack.damage * damage_multiplier)
             
             # Apply damage
-            opponent.health -= actual_damage
+            opponent.health = max(0, opponent.health - actual_damage)
             attacking_player.last_hit_time = current_time
             
             # Update combo
@@ -704,6 +782,7 @@ class EnhancedGameSystem:
         
         # Initialize components
         self.irl_fighting_game = IRLFightingGame(TARGET_WIDTH, TARGET_HEIGHT)
+        self.sword_gesture_recognizer = GestureRecognizer()
         
         # Enhanced sword fighting game state
         self.sword_players = [
@@ -816,7 +895,7 @@ class EnhancedGameSystem:
     
     def run(self):
         """Main game loop"""
-        print("🎮 Enhanced Fighting Game System")
+        print("Enhanced Fighting Game System")
         print("Select mode:")
         print("  [1] Sword Fighting Game (Multi-player)")
         print("  [2] IRL Martial Arts Fighting (Gesture-based)")
@@ -843,7 +922,8 @@ class EnhancedGameSystem:
                     frame = self.run_irl_fighting(frame, poses, current_time)
                 
                 # Display frame
-                cv2.imshow('Enhanced Fighting Game System', frame)
+                if frame is not None:
+                    cv2.imshow('Enhanced Fighting Game System', frame)
                 
                 # Handle input
                 key = cv2.waitKey(1) & 0xFF
@@ -879,7 +959,7 @@ class EnhancedGameSystem:
         frame.fill(30)
         
         # Title
-        title = "🥊 ENHANCED FIGHTING GAME SYSTEM 🗡️"
+        title = "ENHANCED FIGHTING GAME SYSTEM"
         text_size = cv2.getTextSize(title, cv2.FONT_HERSHEY_SIMPLEX, 1.2, 3)[0]
         text_x = (TARGET_WIDTH - text_size[0]) // 2
         cv2.putText(frame, title, (text_x, 80), cv2.FONT_HERSHEY_SIMPLEX, 1.2, WHITE, 3)
@@ -918,7 +998,7 @@ class EnhancedGameSystem:
         
         # Instructions
         instructions = [
-            "🎮 CONTROLS:",
+            "CONTROLS:",
             "Sword Fighting: Use red/blue colored objects as swords",
             "IRL Fighting: Use your body gestures to attack and defend",
             "Both modes: [R] Restart game, [M] Return to menu"
@@ -926,12 +1006,19 @@ class EnhancedGameSystem:
         
         inst_y = y_start + len(options) * 30 + 50
         for i, inst in enumerate(instructions):
-            color = CYAN if inst.startswith('🎮') else WHITE
+            color = CYAN if inst.startswith('CONTROLS') else WHITE
             cv2.putText(frame, inst, (50, inst_y + i * 25), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
         
         return frame
-    
+
+    def _offset_landmarks(self, landmarks: List[Any], z_offset: float) -> List[Any]:
+        """Offsets the z-coordinate of landmarks."""
+        offset_landmarks = []
+        for lm in landmarks:
+            offset_landmarks.append(OffsetLandmark(lm.x, lm.y, lm.z + z_offset, lm.visibility))
+        return offset_landmarks
+
     def run_sword_fighting(self, frame: np.ndarray, poses: List[Any], current_time: float) -> np.ndarray:
         """Run enhanced sword fighting game mode with multi-player detection"""
         frame_height, frame_width = frame.shape[:2]
@@ -949,6 +1036,14 @@ class EnhancedGameSystem:
         body_boxes = []
         sword_active = [False, False]  # Track which players have active swords
         
+        # Sort poses by x-position to correctly assign players
+        if len(poses) == 2 and poses[0] and poses[1]:
+            if len(poses[0]) > 0 and len(poses[1]) > 0:
+                pose1_x = sum(lm.x for lm in poses[0]) / len(poses[0])
+                pose2_x = sum(lm.x for lm in poses[1]) / len(poses[1])
+                if pose1_x > pose2_x:
+                    poses = [poses[1], poses[0]] # Swap poses
+
         for i, pose_landmarks in enumerate(poses[:2]):  # Max 2 players
             if pose_landmarks:
                 player_color = COLORS['player1'] if i == 0 else COLORS['player2']
@@ -957,7 +1052,7 @@ class EnhancedGameSystem:
                 self._draw_enhanced_stick_figure(frame, pose_landmarks, player_color)
                 
                 # Draw realistic sword when wrists combine
-                has_sword = self._draw_realistic_sword(frame, pose_landmarks, player_color)
+                has_sword = self._draw_realistic_sword(frame, pose_landmarks, player_color, self.sword_players[i])
                 sword_active[i] = has_sword
                 
                 if has_sword:
@@ -974,6 +1069,13 @@ class EnhancedGameSystem:
                 if i < len(self.sword_players):
                     self.sword_players[i].pose_landmarks = pose_landmarks
                     self.sword_players[i].body_box = box
+
+                    # Detect sword gesture
+                    attack = self.sword_gesture_recognizer.detect_sword_gesture_only(self.sword_players[i], current_time)
+                    if attack and attack.attack_type == AttackType.SWORD_GESTURE:
+                        self.sword_players[i].current_attack = AttackType.SWORD_GESTURE
+                    else:
+                        self.sword_players[i].current_attack = None
         
         # Get sword tips for active swords
         sword_tip_p1 = None
@@ -1006,76 +1108,21 @@ class EnhancedGameSystem:
             cv2.putText(frame, "TIP", (sword_tip_p2[0] - 15, sword_tip_p2[1] - 15), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, WHITE, 1)
         
-        # Advanced hit detection with realistic sword collision
+        # Hit detection using bounding boxes
         if not self.winner and len(poses) >= 2:
-            # Get sword and body segments for collision detection
-            player1_sword = None
-            player2_sword = None
-            player1_body = []
-            player2_body = []
-            
-            if poses[0] and sword_active[0]:  # Player 1
-                player1_sword = self._get_sword_line_segment(poses[0], frame_width, frame_height)
-                player1_body = self._get_body_line_segments(poses[0], frame_width, frame_height)
-            
-            if poses[1] and sword_active[1]:  # Player 2
-                player2_sword = self._get_sword_line_segment(poses[1], frame_width, frame_height)
-                player2_body = self._get_body_line_segments(poses[1], frame_width, frame_height)
-            
-            # Player 1 hits Player 2 (only if Player 1 has active sword)
-            if player1_sword and player2_body:
-                if self._check_sword_body_collision([player1_sword], player2_body):
-                    if current_time - self.sword_players[0].last_hit_time > HIT_COOLDOWN:
-                        self.sword_players[0].score += 1
-                        self.sword_players[0].last_hit_time = current_time
-                        print("Player 1 hits Player 2 with sword!")
-                        
-                        # Enhanced visual hit effect
-                        for body_start, body_end in player2_body:
-                            cv2.line(frame, body_start, body_end, COLORS['hit_effect'], 8)
-                        
-                        # Draw hit indicator
-                        hit_center = (
-                            (player1_sword[0][0] + player1_sword[1][0]) // 2,
-                            (player1_sword[0][1] + player1_sword[1][1]) // 2
-                        )
-                        cv2.putText(frame, "HIT!", (hit_center[0] - 20, hit_center[1] - 20), 
-                                   cv2.FONT_HERSHEY_SIMPLEX, 1.0, COLORS['hit_effect'], 3)
-            
-            # Player 2 hits Player 1 (only if Player 2 has active sword)
-            if player2_sword and player1_body:
-                if self._check_sword_body_collision([player2_sword], player1_body):
-                    if current_time - self.sword_players[1].last_hit_time > HIT_COOLDOWN:
-                        self.sword_players[1].score += 1
-                        self.sword_players[1].last_hit_time = current_time
-                        print("Player 2 hits Player 1 with sword!")
-                        
-                        # Enhanced visual hit effect
-                        for body_start, body_end in player1_body:
-                            cv2.line(frame, body_start, body_end, COLORS['hit_effect'], 8)
-                        
-                        # Draw hit indicator
-                        hit_center = (
-                            (player2_sword[0][0] + player2_sword[1][0]) // 2,
-                            (player2_sword[0][1] + player2_sword[1][1]) // 2
-                        )
-                        cv2.putText(frame, "HIT!", (hit_center[0] - 20, hit_center[1] - 20), 
-                                   cv2.FONT_HERSHEY_SIMPLEX, 1.0, COLORS['hit_effect'], 3)
-            
-            # Fallback to point-based detection for sword tips
             if len(body_boxes) > 1 and sword_tip_p1 and body_boxes[1]:
                 if self.check_hit(sword_tip_p1, body_boxes[1]):
                     if current_time - self.sword_players[0].last_hit_time > HIT_COOLDOWN:
                         self.sword_players[0].score += 1
                         self.sword_players[0].last_hit_time = current_time
-                        print("Player 1 hits Player 2! (fallback)")
+                        print("Player 1 hits Player 2!")
             
             if len(body_boxes) > 0 and sword_tip_p2 and body_boxes[0]:
                 if self.check_hit(sword_tip_p2, body_boxes[0]):
                     if current_time - self.sword_players[1].last_hit_time > HIT_COOLDOWN:
                         self.sword_players[1].score += 1
                         self.sword_players[1].last_hit_time = current_time
-                        print("Player 2 hits Player 1! (fallback)")
+                        print("Player 2 hits Player 1!")
         
         # Check winner
         elapsed_time = current_time - self.game_start_time
@@ -1171,6 +1218,18 @@ class EnhancedGameSystem:
             # Head/neck
             (mp_pose.PoseLandmark.NOSE.value, mp_pose.PoseLandmark.LEFT_SHOULDER.value, 2),
             (mp_pose.PoseLandmark.NOSE.value, mp_pose.PoseLandmark.RIGHT_SHOULDER.value, 2),
+
+            # Hands
+            (mp_pose.PoseLandmark.LEFT_WRIST.value, mp_pose.PoseLandmark.LEFT_PINKY.value, 1),
+            (mp_pose.PoseLandmark.LEFT_WRIST.value, mp_pose.PoseLandmark.LEFT_INDEX.value, 1),
+            (mp_pose.PoseLandmark.RIGHT_WRIST.value, mp_pose.PoseLandmark.RIGHT_PINKY.value, 1),
+            (mp_pose.PoseLandmark.RIGHT_WRIST.value, mp_pose.PoseLandmark.RIGHT_INDEX.value, 1),
+
+            # Feet
+            (mp_pose.PoseLandmark.LEFT_ANKLE.value, mp_pose.PoseLandmark.LEFT_HEEL.value, 2),
+            (mp_pose.PoseLandmark.LEFT_HEEL.value, mp_pose.PoseLandmark.LEFT_FOOT_INDEX.value, 2),
+            (mp_pose.PoseLandmark.RIGHT_ANKLE.value, mp_pose.PoseLandmark.RIGHT_HEEL.value, 2),
+            (mp_pose.PoseLandmark.RIGHT_HEEL.value, mp_pose.PoseLandmark.RIGHT_FOOT_INDEX.value, 2),
         ]
         
         for start_idx, end_idx, thickness in connections:
@@ -1178,7 +1237,7 @@ class EnhancedGameSystem:
                 start_lm = landmarks[start_idx]
                 end_lm = landmarks[end_idx]
                 
-                if start_lm.visibility > 0.5 and end_lm.visibility > 0.5:
+                if start_lm.visibility > 0.2 and end_lm.visibility > 0.2:
                     start_pos = (int(start_lm.x * w), int(start_lm.y * h))
                     end_pos = (int(end_lm.x * w), int(end_lm.y * h))
                     
@@ -1206,14 +1265,17 @@ class EnhancedGameSystem:
             mp_pose.PoseLandmark.RIGHT_ELBOW.value, mp_pose.PoseLandmark.LEFT_WRIST.value, 
             mp_pose.PoseLandmark.RIGHT_WRIST.value, mp_pose.PoseLandmark.LEFT_HIP.value, 
             mp_pose.PoseLandmark.RIGHT_HIP.value, mp_pose.PoseLandmark.LEFT_KNEE.value, 
-            mp_pose.PoseLandmark.RIGHT_KNEE.value
+            mp_pose.PoseLandmark.RIGHT_KNEE.value, mp_pose.PoseLandmark.LEFT_ANKLE.value,
+            mp_pose.PoseLandmark.RIGHT_ANKLE.value, mp_pose.PoseLandmark.LEFT_HEEL.value,
+            mp_pose.PoseLandmark.RIGHT_HEEL.value, mp_pose.PoseLandmark.LEFT_FOOT_INDEX.value,
+            mp_pose.PoseLandmark.RIGHT_FOOT_INDEX.value
         ]
         
         for joint_idx in joint_landmarks:
             try:
                 joint_lm = landmarks[joint_idx]
                 
-                if joint_lm.visibility > 0.5:
+                if joint_lm.visibility > 0.2:
                     pos = (int(joint_lm.x * w), int(joint_lm.y * h))
                     radius = 4
                     
@@ -1231,19 +1293,22 @@ class EnhancedGameSystem:
             except (AttributeError, IndexError):
                 continue
     
-    def _draw_realistic_sword(self, frame: np.ndarray, landmarks: List[Any], player_color: Tuple[int, int, int]) -> bool:
+    def _draw_realistic_sword(self, frame: np.ndarray, landmarks: List[Any], player_color: Tuple[int, int, int], player: Player) -> bool:
         """Draw single realistic 3D sword when wrists combine, considering wrist angle"""
         h, w = frame.shape[:2]
         
         try:
+            if player.current_attack != AttackType.SWORD_GESTURE:
+                return False
+
             # Get wrist and elbow positions for 3D angle calculation
             left_wrist = landmarks[mp_pose.PoseLandmark.LEFT_WRIST.value]
             right_wrist = landmarks[mp_pose.PoseLandmark.RIGHT_WRIST.value]
             left_elbow = landmarks[mp_pose.PoseLandmark.LEFT_ELBOW.value]
             right_elbow = landmarks[mp_pose.PoseLandmark.RIGHT_ELBOW.value]
             
-            if (left_wrist.visibility < 0.5 or right_wrist.visibility < 0.5 or
-                left_elbow.visibility < 0.5 or right_elbow.visibility < 0.5):
+            if (left_wrist.visibility < 0.2 or right_wrist.visibility < 0.2 or
+                left_elbow.visibility < 0.2 or right_elbow.visibility < 0.2):
                 return False
             
             # Calculate 3D positions
@@ -1252,24 +1317,21 @@ class EnhancedGameSystem:
             left_elbow_3d = (left_elbow.x * w, left_elbow.y * h, left_elbow.z * DEPTH_SCALE_FACTOR)
             right_elbow_3d = (right_elbow.x * w, right_elbow.y * h, right_elbow.z * DEPTH_SCALE_FACTOR)
             
-            # Calculate 3D distance between wrists
-            wrist_distance_3d = math.sqrt(
-                (left_wrist_3d[0] - right_wrist_3d[0])**2 + 
-                (left_wrist_3d[1] - right_wrist_3d[1])**2 +
-                (left_wrist_3d[2] - right_wrist_3d[2])**2
-            )
             
-            # Only draw sword if wrists are close enough (combined)
-            if wrist_distance_3d > WRIST_COMBINE_DISTANCE:
-                return False
             
             # Calculate torso height for sword scaling
             torso_height = self._get_torso_height(landmarks, w, h)
             if torso_height == 0:
                 return False
             
-            # Scale sword based on torso height - 2D length calculation for consistency
-            sword_length = int(torso_height * SWORD_TO_TORSO_RATIO)
+            # Smooth the torso height to prevent jittery sword resizing
+            if player.smoothed_torso_height == 0:
+                player.smoothed_torso_height = torso_height
+            else:
+                player.smoothed_torso_height = player.smoothed_torso_height * 0.9 + torso_height * 0.1
+            
+            # Scale sword based on smoothed torso height
+            sword_length = int(player.smoothed_torso_height * SWORD_TO_TORSO_RATIO)
             
             # Keep sword length consistent in 2D but use 3D logic for direction and effects
             sword_width = max(6, int(sword_length * 0.04))
@@ -1282,6 +1344,14 @@ class EnhancedGameSystem:
                 (left_wrist_3d[2] + right_wrist_3d[2]) / 2
             )
             
+            # Determine dominant hand (more forward)
+            if left_wrist_3d[2] < right_wrist_3d[2]:
+                dominant_wrist_3d = left_wrist_3d
+                dominant_elbow_3d = left_elbow_3d
+            else:
+                dominant_wrist_3d = right_wrist_3d
+                dominant_elbow_3d = right_elbow_3d
+
             # Calculate enhanced 3D sword direction considering both elbows and wrists
             # Get individual arm directions from elbows to wrists
             left_arm_dir = (
@@ -1310,11 +1380,14 @@ class EnhancedGameSystem:
                 sword_base_3d[2] - elbow_center_3d[2]
             )
             
-            # Weight the arm directions: 70% individual arm directions, 30% wrist-to-elbow
+            # Weight the arm directions: 60% dominant arm, 20% other arm, 20% wrist-to-elbow
+            dominant_arm_dir = left_arm_dir if left_wrist_3d[2] < right_wrist_3d[2] else right_arm_dir
+            other_arm_dir = right_arm_dir if left_wrist_3d[2] < right_wrist_3d[2] else left_arm_dir
+
             avg_arm_dir = (
-                (left_arm_dir[0] + right_arm_dir[0]) * 0.7 + wrist_to_elbow_dir[0] * 0.3,
-                (left_arm_dir[1] + right_arm_dir[1]) * 0.7 + wrist_to_elbow_dir[1] * 0.3,
-                (left_arm_dir[2] + right_arm_dir[2]) * 0.7 + wrist_to_elbow_dir[2] * 0.3
+                dominant_arm_dir[0] * 0.6 + other_arm_dir[0] * 0.2 + wrist_to_elbow_dir[0] * 0.2,
+                dominant_arm_dir[1] * 0.6 + other_arm_dir[1] * 0.2 + wrist_to_elbow_dir[1] * 0.2,
+                dominant_arm_dir[2] * 0.6 + other_arm_dir[2] * 0.2 + wrist_to_elbow_dir[2] * 0.2
             )
             
             # Normalize 3D direction vector
@@ -1695,102 +1768,7 @@ class EnhancedGameSystem:
         except (AttributeError, IndexError, ZeroDivisionError):
             return None
     
-    def _get_body_line_segments(self, landmarks: List[Any], frame_width: int, frame_height: int) -> List[Tuple[Tuple[int, int], Tuple[int, int]]]:
-        """Get body line segments for precise sword collision detection"""
-        segments = []
-        
-        # Define body connections for collision detection
-        body_connections = [
-            # Torso (main target areas)
-            (mp_pose.PoseLandmark.LEFT_SHOULDER.value, mp_pose.PoseLandmark.RIGHT_SHOULDER.value),
-            (mp_pose.PoseLandmark.LEFT_SHOULDER.value, mp_pose.PoseLandmark.LEFT_HIP.value),
-            (mp_pose.PoseLandmark.RIGHT_SHOULDER.value, mp_pose.PoseLandmark.RIGHT_HIP.value),
-            (mp_pose.PoseLandmark.LEFT_HIP.value, mp_pose.PoseLandmark.RIGHT_HIP.value),
-            
-            # Arms
-            (mp_pose.PoseLandmark.LEFT_SHOULDER.value, mp_pose.PoseLandmark.LEFT_ELBOW.value),
-            (mp_pose.PoseLandmark.LEFT_ELBOW.value, mp_pose.PoseLandmark.LEFT_WRIST.value),
-            (mp_pose.PoseLandmark.RIGHT_SHOULDER.value, mp_pose.PoseLandmark.RIGHT_ELBOW.value),
-            (mp_pose.PoseLandmark.RIGHT_ELBOW.value, mp_pose.PoseLandmark.RIGHT_WRIST.value),
-            
-            # Legs
-            (mp_pose.PoseLandmark.LEFT_HIP.value, mp_pose.PoseLandmark.LEFT_KNEE.value),
-            (mp_pose.PoseLandmark.LEFT_KNEE.value, mp_pose.PoseLandmark.LEFT_ANKLE.value),
-            (mp_pose.PoseLandmark.RIGHT_HIP.value, mp_pose.PoseLandmark.RIGHT_KNEE.value),
-            (mp_pose.PoseLandmark.RIGHT_KNEE.value, mp_pose.PoseLandmark.RIGHT_ANKLE.value),
-            
-            # Head/neck
-            (mp_pose.PoseLandmark.NOSE.value, mp_pose.PoseLandmark.LEFT_SHOULDER.value),
-            (mp_pose.PoseLandmark.NOSE.value, mp_pose.PoseLandmark.RIGHT_SHOULDER.value),
-        ]
-        
-        for start_idx, end_idx in body_connections:
-            try:
-                start_lm = landmarks[start_idx]
-                end_lm = landmarks[end_idx]
-                
-                if start_lm.visibility > 0.5 and end_lm.visibility > 0.5:
-                    start_pos = (int(start_lm.x * frame_width), int(start_lm.y * frame_height))
-                    end_pos = (int(end_lm.x * frame_width), int(end_lm.y * frame_height))
-                    segments.append((start_pos, end_pos))
-                    
-            except (AttributeError, IndexError):
-                continue
-        
-        return segments
     
-    def _line_intersect(self, line1_start: Tuple[int, int], line1_end: Tuple[int, int], 
-                       line2_start: Tuple[int, int], line2_end: Tuple[int, int]) -> bool:
-        """Check if two line segments intersect using cross product method"""
-        def ccw(A, B, C):
-            return (C[1] - A[1]) * (B[0] - A[0]) > (B[1] - A[1]) * (C[0] - A[0])
-        
-        A, B = line1_start, line1_end
-        C, D = line2_start, line2_end
-        
-        return ccw(A, C, D) != ccw(B, C, D) and ccw(A, B, C) != ccw(A, B, D)
-    
-    def _point_to_line_distance(self, point: Tuple[int, int], line_start: Tuple[int, int], line_end: Tuple[int, int]) -> float:
-        """Calculate minimum distance from point to line segment"""
-        x0, y0 = point
-        x1, y1 = line_start
-        x2, y2 = line_end
-        
-        # Calculate line length
-        line_length = math.sqrt((x2 - x1)**2 + (y2 - y1)**2)
-        if line_length == 0:
-            return math.sqrt((x0 - x1)**2 + (y0 - y1)**2)
-        
-        # Calculate distance
-        t = max(0, min(1, ((x0 - x1) * (x2 - x1) + (y0 - y1) * (y2 - y1)) / (line_length**2)))
-        projection_x = x1 + t * (x2 - x1)
-        projection_y = y1 + t * (y2 - y1)
-        
-        return math.sqrt((x0 - projection_x)**2 + (y0 - projection_y)**2)
-    
-    def _check_sword_body_collision(self, sword_segments: List[Tuple[Tuple[int, int], Tuple[int, int]]], 
-                                   body_segments: List[Tuple[Tuple[int, int], Tuple[int, int]]],
-                                   collision_threshold: float = 20.0) -> bool:
-        """Check if sword segments collide with body segments"""
-        for sword_start, sword_end in sword_segments:
-            for body_start, body_end in body_segments:
-                # Check direct line intersection
-                if self._line_intersect(sword_start, sword_end, body_start, body_end):
-                    return True
-                
-                # Check if sword tip is close to body segment
-                tip_distance = self._point_to_line_distance(sword_end, body_start, body_end)
-                if tip_distance < collision_threshold:
-                    return True
-                
-                # Check if sword blade passes close to body joints
-                joint_distance_start = self._point_to_line_distance(body_start, sword_start, sword_end)
-                joint_distance_end = self._point_to_line_distance(body_end, sword_start, sword_end)
-                
-                if joint_distance_start < collision_threshold or joint_distance_end < collision_threshold:
-                    return True
-        
-        return False
     
     def _get_body_bounding_box_from_landmarks(self, landmarks: List[Any], frame_width: int, frame_height: int) -> Optional[Tuple[int, int, int, int]]:
         """Get body bounding box from pose landmarks"""
@@ -1882,15 +1860,15 @@ class EnhancedGameSystem:
 
 if __name__ == "__main__":
     try:
-        print("🎮 Starting Enhanced Fighting Game System...")
-        print("✅ Multi-player pose detection enabled")
-        print("✅ IRL gesture-based fighting enabled")
-        print("✅ Enhanced 3D stick figure rendering enabled")
+        print("Starting Enhanced Fighting Game System...")
+        print("Multi-player pose detection enabled")
+        print("IRL gesture-based fighting enabled")
+        print("Enhanced 3D stick figure rendering enabled")
         print()
         
         game_system = EnhancedGameSystem()
         game_system.run()
     except Exception as e:
-        print(f"❌ Error starting game system: {e}")
+        print(f"Error starting game system: {e}")
         import traceback
         traceback.print_exc()

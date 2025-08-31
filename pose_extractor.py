@@ -55,34 +55,34 @@ def configure_nvidia_gpu():
                     
                     # Set GPU as preferred device
                     tf.config.experimental.set_visible_devices(gpus[0], 'GPU')
-                    print(f"✅ Configured TensorFlow to use NVIDIA GPU: {gpus[0]}")
+                    print(f"Configured TensorFlow to use NVIDIA GPU: {gpus[0]}")
                     return True
                 except RuntimeError as e:
-                    print(f"⚠️  GPU configuration error: {e}")
+                    print(f"GPU configuration error: {e}")
                     return False
             else:
                 # Try alternative GPU detection methods
-                print("⚠️  No NVIDIA GPUs detected by TensorFlow, trying alternative methods...")
+                print("No NVIDIA GPUs detected by TensorFlow, trying alternative methods...")
                 
                 # Check if CUDA is available at all
                 if tf.test.is_built_with_cuda():
-                    print("✅ TensorFlow was built with CUDA support")
+                    print("TensorFlow was built with CUDA support")
                     # Even if GPU isn't detected, MediaPipe might still use GPU
                     return True
                 else:
-                    print("❌ TensorFlow was not built with CUDA support")
+                    print("TensorFlow was not built with CUDA support")
                     return False
                     
         except Exception as gpu_error:
-            print(f"⚠️  GPU detection failed: {gpu_error}")
+            print(f"GPU detection failed: {gpu_error}")
             # Check if we can still use CUDA for MediaPipe
             if tf.test.is_built_with_cuda():
-                print("✅ TensorFlow has CUDA support, MediaPipe may still use GPU")
+                print("TensorFlow has CUDA support, MediaPipe may still use GPU")
                 return True
             return False
             
     except Exception as e:
-        print(f"⚠️  Failed to configure NVIDIA GPU: {e}")
+        print(f"Failed to configure NVIDIA GPU: {e}")
         return False
 
 class BodyPart(Enum):
@@ -157,12 +157,12 @@ class PoseExtractor:
                     )
                     
                     if self.gpu_configured:
-                        print("🚀 MediaPipe initialized with NVIDIA GPU acceleration!")
+                        print("MediaPipe initialized with NVIDIA GPU acceleration!")
                     else:
-                        print("🔧 MediaPipe initialized with GPU support (TensorFlow fallback)")
+                        print("MediaPipe initialized with GPU support (TensorFlow fallback)")
                         
                 except Exception as mp_error:
-                    print(f"⚠️  MediaPipe GPU initialization failed: {mp_error}")
+                    print(f"MediaPipe GPU initialization failed: {mp_error}")
                     print("Falling back to CPU...")
                     
                     # Disable GPU for MediaPipe and use CPU
@@ -174,7 +174,7 @@ class PoseExtractor:
                         min_detection_confidence=min_detection_confidence,
                         min_tracking_confidence=min_tracking_confidence
                     )
-                    print("✅ MediaPipe initialized with CPU")
+                    print("MediaPipe initialized with CPU")
             else:
                 print("Initializing MediaPipe with CPU only...")
                 os.environ['MEDIAPIPE_DISABLE_GPU'] = '1'  # Explicitly disable GPU
@@ -185,9 +185,9 @@ class PoseExtractor:
                     min_detection_confidence=min_detection_confidence,
                     min_tracking_confidence=min_tracking_confidence
                 )
-                print("✅ MediaPipe initialized with CPU")
+                print("MediaPipe initialized with CPU")
         except Exception as e:
-            print(f"⚠️  MediaPipe initialization failed, using fallback: {e}")
+            print(f"MediaPipe initialization failed, using fallback: {e}")
             os.environ['MEDIAPIPE_DISABLE_GPU'] = '1'
             self.pose = mp_pose.Pose(
                 static_image_mode=False,
